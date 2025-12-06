@@ -66,30 +66,18 @@ jobs:
 
       - name: Esperar a que la aplicación esté lista
         run: |
-          echo "Esperando a que el servicio esté disponible..."
+          echo "Esperando a que el servicio esté disponible en /actuator/health..."
           timeout=60
           counter=0
           
-          # Intentar múltiples endpoints posibles
           while [ $counter -lt $timeout ]; do
-            # Intentar /actuator/health primero (si tienen Actuator)
-            if curl -f http://localhost:8080/actuator/health 2>/dev/null; then
+            http_code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/actuator/health 2>/dev/null || echo "000")
+            if [ "$http_code" = "200" ]; then
               echo "✅ Servicio disponible en /actuator/health"
               break
             fi
-            # Intentar raíz
-            if curl -f http://localhost:8080/ 2>/dev/null; then
-              echo "✅ Servicio disponible en /"
-              break
-            fi
-            # Intentar cualquier respuesta HTTP (incluso 404 significa que el servidor está corriendo)
-            http_code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/ 2>/dev/null || echo "000")
-            if [ "$http_code" != "000" ] && [ "$http_code" != "" ]; then
-              echo "✅ Servicio respondiendo (código HTTP: $http_code)"
-              break
-            fi
             
-            echo "Intento $counter/$timeout: Esperando servicio..."
+            echo "Intento $counter/$timeout: Esperando servicio... (código HTTP: $http_code)"
             sleep 2
             counter=$((counter + 2))
           done
@@ -100,27 +88,17 @@ jobs:
             exit 1
           fi
 
-      - name: Health Check - Verificar endpoint
+      - name: Health Check - Verificar endpoint /actuator/health
         run: |
-          echo "Realizando health check..."
+          echo "Realizando health check en /actuator/health..."
           
-          # Intentar /actuator/health primero (recomendado)
-          health_endpoint=""
-          if curl -f http://localhost:8080/actuator/health 2>/dev/null; then
-            health_endpoint="/actuator/health"
-            echo "Usando endpoint: /actuator/health"
-          else
-            # Si no hay Actuator, usar raíz
-            health_endpoint="/"
-            echo "Usando endpoint: / (Actuator no disponible)"
-          fi
-          
-          response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080$health_endpoint || echo "000")
-          body=$(curl -s http://localhost:8080$health_endpoint || echo "")
+          response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/actuator/health || echo "000")
+          body=$(curl -s http://localhost:8080/actuator/health || echo "")
           
           echo "Código de respuesta HTTP: $response"
           echo "Cuerpo de respuesta: $body"
           
+          # Verificar código HTTP 200
           if [ "$response" != "200" ]; then
             echo "❌ Health check falló: Código HTTP $response (esperado 200)"
             docker logs calculadora-backend-test
@@ -129,20 +107,26 @@ jobs:
             exit 1
           fi
           
-          # Verificar contenido de respuesta
-          if echo "$body" | grep -q '"status":"UP"'; then
-            echo "✅ Health check exitoso: Servicio respondió 200 OK con status UP"
-          elif echo "$body" | grep -qi "ok"; then
-            echo "✅ Health check exitoso: Servicio respondió 200 OK"
-          elif [ "$response" = "200" ]; then
-            echo "✅ Health check exitoso: Servicio respondió 200 OK"
-          else
-            echo "❌ Health check falló: Respuesta inesperada"
+          # Verificar que el cuerpo contenga "status":"UP"
+          if ! echo "$body" | grep -q '"status":"UP"'; then
+            echo "❌ Health check falló: El cuerpo no contiene '\"status\":\"UP\"'"
+            echo "Cuerpo recibido: $body"
             docker logs calculadora-backend-test
             docker stop calculadora-backend-test
             docker rm calculadora-backend-test
             exit 1
           fi
+          
+          # Verificar que contenga los grupos liveness y readiness (opcional pero recomendado)
+          if echo "$body" | grep -q '"groups":\["liveness","readiness"\]'; then
+            echo "✅ Health check exitoso: Servicio respondió 200 OK con status UP y grupos liveness/readiness"
+          elif echo "$body" | grep -q '"groups"'; then
+            echo "✅ Health check exitoso: Servicio respondió 200 OK con status UP y grupos configurados"
+          else
+            echo "✅ Health check exitoso: Servicio respondió 200 OK con status UP"
+          fi
+          
+          echo "✅ Validación completada: El endpoint /actuator/health responde correctamente"
 
       - name: Detener contenedor de prueba
         if: always()
