@@ -1,0 +1,430 @@
+name: Build Docker Image
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: calculadora-backend
+  REGISTRY: ghcr.io
+
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Configurar owner en minúsculas
+        id: set-owner
+        run: |
+          OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "owner_lower=$OWNER_LOWER" >> $GITHUB_OUTPUT
+          echo "Owner en minúsculas: $OWNER_LOWER"
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Iniciar sesión en GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extraer metadatos (etiquetas, etiquetas) para Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.set-owner.outputs.owner_lower }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Construir imagen Docker multi-arquitectura
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./CalculatorBackendSpringbootProject
+          file: ./CalculatorBackendSpringbootProject/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ steps.set-owner.outputs.owner_lower }}/${{ env.IMAGE_NAME }}:test-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  health-check:
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Iniciar sesión en GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Ejecutar contenedor para health check
+        run: |
+          OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          TEST_IMAGE="${{ env.REGISTRY }}/$OWNER_LOWER/${{ env.IMAGE_NAME }}:test-${{ github.sha }}"
+          docker pull $TEST_IMAGE
+          docker run -d -p 8080:8080 --name calculadora-backend-test $TEST_IMAGE
+          echo "Contenedor iniciado, esperando a que la aplicación esté lista..."
+
+      - name: Esperar a que la aplicación esté lista
+        run: |
+          echo "Esperando a que el servicio esté disponible en /actuator/health..."
+          timeout=60
+          counter=0
+          
+          while [ $counter -lt $timeout ]; do
+            http_code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/actuator/health 2>/dev/null || echo "000")
+            if [ "$http_code" = "200" ]; then
+              echo "✅ Servicio disponible en /actuator/health"
+              break
+            fi
+            
+            echo "Intento $counter/$timeout: Esperando servicio... (código HTTP: $http_code)"
+            sleep 2
+            counter=$((counter + 2))
+          done
+          
+          if [ $counter -ge $timeout ]; then
+            echo "❌ Timeout: El servicio no respondió a tiempo"
+            docker logs calculadora-backend-test
+            exit 1
+          fi
+
+      - name: Health Check - Verificar endpoint /actuator/health
+        run: |
+          echo "Realizando health check en /actuator/health..."
+          
+          response=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/actuator/health || echo "000")
+          body=$(curl -s http://localhost:8080/actuator/health || echo "")
+          
+          echo "Código de respuesta HTTP: $response"
+          echo "Cuerpo de respuesta: $body"
+          
+          # Verificar código HTTP 200
+          if [ "$response" != "200" ]; then
+            echo "❌ Health check falló: Código HTTP $response (esperado 200)"
+            docker logs calculadora-backend-test
+            docker stop calculadora-backend-test
+            docker rm calculadora-backend-test
+            exit 1
+          fi
+          
+          # Verificar que el cuerpo contenga "status":"UP"
+          if ! echo "$body" | grep -q '"status":"UP"'; then
+            echo "❌ Health check falló: El cuerpo no contiene '\"status\":\"UP\"'"
+            echo "Cuerpo recibido: $body"
+            docker logs calculadora-backend-test
+            docker stop calculadora-backend-test
+            docker rm calculadora-backend-test
+            exit 1
+          fi
+          
+          # Verificar que contenga los grupos liveness y readiness (opcional pero recomendado)
+          if echo "$body" | grep -q '"groups":\["liveness","readiness"\]'; then
+            echo "✅ Health check exitoso: Servicio respondió 200 OK con status UP y grupos liveness/readiness"
+          elif echo "$body" | grep -q '"groups"'; then
+            echo "✅ Health check exitoso: Servicio respondió 200 OK con status UP y grupos configurados"
+          else
+            echo "✅ Health check exitoso: Servicio respondió 200 OK con status UP"
+          fi
+          
+          echo "✅ Validación completada: El endpoint /actuator/health responde correctamente"
+
+      - name: Detener contenedor de prueba
+        if: always()
+        run: |
+          docker stop calculadora-backend-test || true
+          docker rm calculadora-backend-test || true
+
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: [build, health-check]
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+      id-token: write
+
+    steps:
+      - name: Iniciar sesión en GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configurar owner en minúsculas
+        id: set-owner
+        run: |
+          OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "owner_lower=$OWNER_LOWER" >> $GITHUB_OUTPUT
+          echo "Owner en minúsculas: $OWNER_LOWER"
+
+      - name: Ejecutar escaneo de vulnerabilidades con Snyk
+        uses: snyk/actions/docker@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          image: ${{ env.REGISTRY }}/${{ steps.set-owner.outputs.owner_lower }}/${{ env.IMAGE_NAME }}:test-${{ github.sha }}
+          args: |
+            --severity-threshold=high
+            --json-file-output=snyk-results.json
+            --sarif-file-output=snyk-results.sarif
+
+      - name: Verificar archivos generados por Snyk
+        run: |
+          echo "📁 Verificando archivos generados por Snyk..."
+          ls -la *.json *.sarif 2>/dev/null || echo "No se encontraron archivos de resultados"
+          if [ -f snyk-results.json ]; then
+            echo "✅ Archivo JSON encontrado"
+          else
+            echo "⚠️ Archivo JSON no encontrado"
+          fi
+          if [ -f snyk-results.sarif ]; then
+            echo "✅ Archivo SARIF encontrado"
+          else
+            echo "⚠️ Archivo SARIF no encontrado (puede ser normal si no hay vulnerabilidades)"
+          fi
+
+      - name: Procesar resultados de Snyk
+        id: snyk-results
+        run: |
+          if [ -f snyk-results.json ]; then
+            echo "📊 Analizando resultados de Snyk..."
+            
+            # Contar vulnerabilidades por severidad
+            CRITICAL=$(jq -r '.vulnerabilities[]? | select(.severity == "critical") | .id' snyk-results.json | sort -u | wc -l | tr -d ' ')
+            HIGH=$(jq -r '.vulnerabilities[]? | select(.severity == "high") | .id' snyk-results.json | sort -u | wc -l | tr -d ' ')
+            MEDIUM=$(jq -r '.vulnerabilities[]? | select(.severity == "medium") | .id' snyk-results.json | sort -u | wc -l | tr -d ' ')
+            LOW=$(jq -r '.vulnerabilities[]? | select(.severity == "low") | .id' snyk-results.json | sort -u | wc -l | tr -d ' ')
+            
+            echo "🔍 Resumen de vulnerabilidades encontradas:"
+            echo "  - Críticas: $CRITICAL"
+            echo "  - Altas: $HIGH"
+            echo "  - Medias: $MEDIUM"
+            echo "  - Bajas: $LOW"
+            
+            # Guardar en outputs
+            echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
+            echo "high=$HIGH" >> $GITHUB_OUTPUT
+            echo "medium=$MEDIUM" >> $GITHUB_OUTPUT
+            echo "low=$LOW" >> $GITHUB_OUTPUT
+            
+            # Verificar si existe SARIF
+            if [ -f snyk-results.sarif ]; then
+              echo "sarif_exists=true" >> $GITHUB_OUTPUT
+            else
+              echo "sarif_exists=false" >> $GITHUB_OUTPUT
+            fi
+            
+            # Generar reporte detallado
+            echo "📄 Generando reporte detallado..."
+            jq '.' snyk-results.json > snyk-report-detailed.json
+            
+            # Mostrar vulnerabilidades críticas y altas
+            if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
+              echo "⚠️ VULNERABILIDADES CRÍTICAS O ALTAS ENCONTRADAS:"
+              echo ""
+              jq -r '.vulnerabilities[]? | select(.severity == "critical" or .severity == "high") | "\(.severity | ascii_upcase): \(.title) - \(.packageName)@\(.version)\n  ID: \(.id)\n  Descripción: \(.description // "Sin descripción")\n  Enlace: \(.url // "N/A")\n"' snyk-results.json
+              echo ""
+              echo "❌ El escaneo encontró vulnerabilidades críticas o altas. La publicación será bloqueada."
+              echo "block_publish=true" >> $GITHUB_OUTPUT
+            else
+              echo "✅ No se encontraron vulnerabilidades críticas o altas."
+              echo "✅ Solo se encontraron vulnerabilidades de severidad media o baja, que son aceptables."
+              echo "block_publish=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "⚠️ No se generó el archivo de resultados de Snyk"
+            echo "block_publish=false" >> $GITHUB_OUTPUT
+            echo "critical=0" >> $GITHUB_OUTPUT
+            echo "high=0" >> $GITHUB_OUTPUT
+            echo "medium=0" >> $GITHUB_OUTPUT
+            echo "low=0" >> $GITHUB_OUTPUT
+            echo "sarif_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Subir reporte SARIF a GitHub Security
+        uses: github/codeql-action/upload-sarif@v4
+        if: always() && steps.snyk-results.outputs.sarif_exists == 'true'
+        with:
+          sarif_file: snyk-results.sarif
+          wait-for-processing: false
+
+      - name: Guardar reporte como artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: snyk-security-report
+          path: |
+            snyk-results.json
+            snyk-report-detailed.json
+            snyk-results.sarif
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Mostrar resumen del escaneo
+        if: always()
+        run: |
+          echo "## 🔒 Resumen del Escaneo de Seguridad" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Severidad | Cantidad |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|----------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔴 Crítica | ${{ steps.snyk-results.outputs.critical }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🟠 Alta | ${{ steps.snyk-results.outputs.high }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🟡 Media | ${{ steps.snyk-results.outputs.medium }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🟢 Baja | ${{ steps.snyk-results.outputs.low }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.snyk-results.outputs.block_publish }}" == "true" ]; then
+            echo "❌ **La publicación ha sido bloqueada debido a vulnerabilidades críticas o altas.**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ **El escaneo pasó. Solo se encontraron vulnerabilidades de severidad media o baja.**" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📄 Los reportes detallados están disponibles en los artifacts del workflow." >> $GITHUB_STEP_SUMMARY
+
+      - name: Fallar si hay vulnerabilidades críticas o altas
+        if: steps.snyk-results.outputs.block_publish == 'true'
+        run: |
+          echo "❌ Bloqueando la publicación debido a vulnerabilidades críticas o altas encontradas."
+          exit 1
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: [build, health-check, security-scan]
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Iniciar sesión en GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configurar owner en minúsculas
+        id: set-owner
+        run: |
+          OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "owner_lower=$OWNER_LOWER" >> $GITHUB_OUTPUT
+          echo "Owner en minúsculas: $OWNER_LOWER"
+
+      - name: Extraer metadatos (etiquetas, etiquetas) para Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.set-owner.outputs.owner_lower }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Re-taggear y publicar imagen (sin reconstruir)
+        run: |
+          SOURCE_IMAGE="${{ env.REGISTRY }}/${{ steps.set-owner.outputs.owner_lower }}/${{ env.IMAGE_NAME }}:test-${{ github.sha }}"
+          
+          # Obtener los tags finales (separados por comas)
+          TAGS="${{ steps.meta.outputs.tags }}"
+          
+          # Usar docker buildx imagetools para crear tags apuntando a la imagen existente
+          echo "$TAGS" | tr ',' '\n' | while read -r tag; do
+            tag=$(echo "$tag" | xargs)  # Trim whitespace
+            if [ -n "$tag" ]; then
+              echo "Re-taggeando imagen a: $tag"
+              # buildx imagetools create crea un tag apuntando a la imagen existente sin reconstruir
+              docker buildx imagetools create -t "$tag" "$SOURCE_IMAGE"
+            fi
+          done
+
+      - name: Mostrar información de la imagen
+        run: |
+          echo "✅ Imagen construida y verificada exitosamente:"
+          echo "Tags: ${{ steps.meta.outputs.tags }}"
+          echo "Puedes acceder a la imagen en: ${{ env.REGISTRY }}/${{ steps.set-owner.outputs.owner_lower }}/${{ env.IMAGE_NAME }}"
+
+  cleanup:
+    runs-on: ubuntu-latest
+    needs: [build, health-check, security-scan]
+    if: always() && (needs.health-check.result == 'failure' || needs.health-check.result == 'cancelled' || needs.security-scan.result == 'failure' || needs.security-scan.result == 'cancelled')
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Eliminar imagen temporal (fallo en validaciones)
+        run: |
+          REASON=""
+          if [ "${{ needs.health-check.result }}" == "failure" ] || [ "${{ needs.health-check.result }}" == "cancelled" ]; then
+            REASON="health-check"
+          fi
+          if [ "${{ needs.security-scan.result }}" == "failure" ] || [ "${{ needs.security-scan.result }}" == "cancelled" ]; then
+            if [ -n "$REASON" ]; then
+              REASON="$REASON y security-scan"
+            else
+              REASON="security-scan"
+            fi
+          fi
+          echo "🧹 Limpiando imagen temporal porque $REASON falló o fue cancelado"
+          
+          # Obtener el ID de la versión del paquete usando el tag
+          PACKAGE_NAME="${{ env.IMAGE_NAME }}"
+          TAG="test-${{ github.sha }}"
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          
+          echo "Buscando versión del paquete con tag: $TAG"
+          
+          # Obtener todas las versiones del paquete y buscar la que tiene nuestro tag
+          VERSIONS=$(curl -s \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/orgs/$OWNER/packages/container/$PACKAGE_NAME/versions")
+          
+          # Buscar el ID de la versión que tiene nuestro tag
+          VERSION_ID=$(echo "$VERSIONS" | grep -B 5 "\"name\":\"$TAG\"" | grep "\"id\"" | head -1 | sed 's/.*"id": \([0-9]*\).*/\1/')
+          
+          if [ -n "$VERSION_ID" ]; then
+            echo "Eliminando versión con ID: $VERSION_ID"
+            curl -X DELETE \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/orgs/$OWNER/packages/container/$PACKAGE_NAME/versions/$VERSION_ID" \
+              && echo "✅ Imagen temporal eliminada exitosamente" \
+              || echo "⚠️ No se pudo eliminar la imagen (puede requerir permisos adicionales)"
+          else
+            echo "⚠️ No se encontró la versión con tag $TAG (puede que ya haya sido eliminada)"
+          fi
+
