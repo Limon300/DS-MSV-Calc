@@ -45,8 +45,9 @@ jobs:
             type=sha,prefix={{branch}}-
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Construir imagen Docker localmente para health check
+      - name: Construir imagen Docker (amd64) para health check
         uses: docker/build-push-action@v5
+        id: build-test
         with:
           context: ./CalculatorBackendSpringbootProject
           file: ./CalculatorBackendSpringbootProject/Dockerfile
@@ -55,10 +56,10 @@ jobs:
           tags: ${{ env.IMAGE_NAME }}:test
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          outputs: type=docker,dest=/tmp/image.tar
+          outputs: type=docker,dest=/tmp/image-test.tar
 
-      - name: Cargar imagen Docker
-        run: docker load -i /tmp/image.tar
+      - name: Cargar imagen Docker para health check
+        run: docker load -i /tmp/image-test.tar
 
       - name: Ejecutar contenedor para health check
         run: |
@@ -135,7 +136,8 @@ jobs:
           docker stop calculadora-backend-test || true
           docker rm calculadora-backend-test || true
 
-      - name: Construir y publicar imagen Docker (multi-arquitectura)
+      - name: Construir y publicar imagen Docker multi-arquitectura (reutiliza cache de health check)
+        if: success()
         uses: docker/build-push-action@v5
         with:
           context: ./CalculatorBackendSpringbootProject
