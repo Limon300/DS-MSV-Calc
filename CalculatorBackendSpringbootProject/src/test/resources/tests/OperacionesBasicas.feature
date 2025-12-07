@@ -70,3 +70,9 @@ Feature: Operaciones basicas
             |-53.51105682515571|-54.76690933642752|0.9770691367015577|
             |93.50432277633905|52.917528943242104|1.7669820311645548|
             |48.201508990713165|82.0779101176312|0.5872653058738025|
+
+    Scenario Outline: Division by zero
+        Given the first number is 100
+        And the second number is 0
+        When the first is divided by zero
+        Then the result should be an exception
