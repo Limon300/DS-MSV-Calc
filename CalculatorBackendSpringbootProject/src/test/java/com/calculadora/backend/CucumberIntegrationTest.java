@@ -13,7 +13,7 @@ import static io.cucumber.junit.platform.engine.Constants.GLUE_PROPERTY_NAME;
 
 @Suite
 @IncludeEngines("cucumber")
-@SelectClasspathResource("tests/unit")
+@SelectClasspathResource("tests/integration")
 @ConfigurationParameter(key = GLUE_PROPERTY_NAME, value = "com.calculadora.backend")
-public class CucumberTest {
+public class CucumberIntegrationTest {
 }

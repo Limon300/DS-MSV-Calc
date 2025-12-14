@@ -6,17 +6,18 @@ package com.calculadora.backend.steps;
 
 
 import com.calculadora.backend.CucumberSpringConfiguration;
+import com.calculadora.backend.ScenarioContext;
 import io.cucumber.java.en.And;
 import io.cucumber.java.en.Given;
 import io.cucumber.java.en.Then;
 import io.cucumber.java.en.When;
 import io.cucumber.spring.CucumberContextConfiguration;
-import java.util.HashMap;
-import java.util.Map;
+import org.springframework.beans.factory.annotation.Autowired;
 
 @CucumberContextConfiguration
 public class OperacionesBasicasSteps extends CucumberSpringConfiguration {
-    Map<String,Object> backpack = new HashMap();
+    @Autowired
+    ScenarioContext backpack;
     
     //Factor a (double)
     @Given("the first number is {double}")
