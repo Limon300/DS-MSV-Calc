@@ -1,4 +1,4 @@
-Feature: Llamar operaciones basicas a la API
+Feature: Llamar operaciones basicas a la API (sumar, restar, multiplicar y dividir)
   Scenario: client makes call to POST /sumar
     Given the first number is 12
     And the second number is 8
