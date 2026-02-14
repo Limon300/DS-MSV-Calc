@@ -17,7 +17,7 @@ jobs:
           fetch-depth: 0
 
       - name: Calculate Lead Time
-        uses: fwd/dora-lead-time-action@v1
+        uses: DeveloperMetrics/lead-time-for-changes@v1.2.24
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           workflows: 'docker-build.yml'  # ⚠️ VERIFY THIS FILE EXISTS
