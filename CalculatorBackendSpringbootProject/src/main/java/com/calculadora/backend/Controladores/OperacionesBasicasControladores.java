@@ -44,13 +44,27 @@ public class OperacionesBasicasControladores {
     }
 
     @PostMapping("/multiplicar")
-    public double multiplicar(@RequestParam double a, @RequestParam double b) {
-        return servicios.multiplicar(a, b);
+    public ResponseEntity<Object> multiplicar(@RequestBody Map<String,Double> a) {
+        double resp;
+        resp = servicios.multiplicar(a.get("a"), a.get("b"));
+        
+        Map<String,Double> stResp;
+        stResp = new HashMap();
+
+        stResp.put("result", resp);
+        return ResponseEntity.ok(stResp);
     }
 
     @PostMapping("/dividir")
-    public double dividir(@RequestParam double a, @RequestParam double b) {
-        return servicios.dividir(a, b);
+    public ResponseEntity<Object> dividir(@RequestBody Map<String,Double> a) {
+        double resp;
+        resp = servicios.dividir(a.get("a"), a.get("b"));
+        
+        Map<String,Double> stResp;
+        stResp = new HashMap();
+
+        stResp.put("result", resp);
+        return ResponseEntity.ok(stResp);
     }
 }
 
